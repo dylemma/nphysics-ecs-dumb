@@ -20,6 +20,10 @@ use nphysics_ecs_dumb::nphysics::volumetric::Volumetric;
 use nphysics_ecs_dumb::*;
 use num_traits::identities::One;
 use std::time::Duration;
+use amethyst::ecs::prelude::*;
+use rand::{Rng, thread_rng};
+
+extern crate rand;
 
 #[derive(Default)]
 struct GameState {
@@ -114,17 +118,27 @@ impl SimpleState for GameState {
         // Add ground
         data.world
             .create_entity()
-            .with(sphere_handle)
-            .with(material)
+            .with(sphere_handle.clone())
+            .with(material.clone())
             .with(Transform::from(Vector3::new(0.0, 0.0, -10.0)))
             .with(GlobalTransform::default())
             .with(
                 //ColliderBuilder::from(ShapeHandle::new(Cuboid::new(Vector3::new(5.0, 1.0, 5.0))))
-                ColliderBuilder::from(ball)
+                ColliderBuilder::from(ball.clone())
                     .physics_material(PhysicsMaterial::default())
                     .build()
                     .unwrap(),
             )
+            .build();
+
+        data.world.create_entity()
+            .with(Spawner {
+                countdown: 20,
+                remaining: 10,
+                ball: ball.clone(),
+                material: material,
+                sphere: sphere_handle
+            })
             .build();
 
         //---------------------------------------------------- nphysics's ball3.rs adapted
@@ -218,6 +232,117 @@ impl SimpleState for GameState {
     }
 }
 
+// A "countdown to deletion" component
+struct TimeToLive(pub u32);
+impl Component for TimeToLive {
+    type Storage = DenseVecStorage<Self>;
+}
+
+// System that acts on `TimeToLive` by deleting entities when the countdown reaches 0
+struct TimeToLiveSystem;
+impl<'s> System<'s> for TimeToLiveSystem {
+    type SystemData = (
+        Entities<'s>,
+        WriteStorage<'s, TimeToLive>,
+    );
+
+    fn run(&mut self, data: Self::SystemData) {
+        let (
+            entities,
+            mut ttl_storage,
+        ) = data;
+        for (mut ttl, entity) in (&mut ttl_storage, &entities).join() {
+            if ttl.0 > 0 {
+                ttl.0 -= 1;
+            }
+            if ttl.0 == 0 {
+                println!("Deleting entity {:?}", entity);
+                entities.delete(entity).unwrap();
+            }
+        }
+    }
+}
+
+// Component for spawning a limited number of balls
+struct Spawner {
+    pub remaining: u32,
+    pub countdown: u32,
+    pub material: Material,
+    pub sphere: MeshHandle,
+    pub ball: ShapeHandle<f32>,
+}
+impl Component for Spawner {
+    type Storage = HashMapStorage<Self>;
+}
+
+// System to run Spawners
+struct SpawnerSystem;
+
+impl<'s> System<'s> for SpawnerSystem {
+    type SystemData = (
+        WriteStorage<'s, Spawner>,
+        Entities<'s>,
+        // storages for spawning new entities
+        WriteStorage<'s, Material>,
+        WriteStorage<'s, MeshHandle>,
+        WriteStorage<'s, Transform>,
+        WriteStorage<'s, GlobalTransform>,
+        WriteStorage<'s, DynamicBody>,
+        WriteStorage<'s, Collider>,
+        WriteStorage<'s, TimeToLive>,
+    );
+
+    fn run(&mut self, data: Self::SystemData) {
+        let (
+            mut spawners,
+            entities,
+            mut material_storage,
+            mut mesh_storage,
+            mut transform_storage,
+            mut global_transform_storage,
+            mut body_storage,
+            mut collider_storage,
+            mut ttl_storage,
+        ) = data;
+
+        for (mut spawner,) in (&mut spawners,).join() {
+            if spawner.remaining > 0 {
+                if spawner.countdown > 0 {
+                    spawner.countdown -= 1;
+                }
+                if spawner.countdown == 0 {
+                    spawner.countdown = 10;
+                    spawner.remaining -= 1;
+
+                    let mut rng = thread_rng();
+
+                    // add a new ball at a random X position
+                    entities.build_entity()
+                        .with(spawner.sphere.clone(), &mut mesh_storage)
+                        .with(spawner.material.clone(), &mut material_storage)
+                        .with(Transform::from(Vector3::new(rng.gen_range(-5.0, 5.0), 15.0, -10.0)), &mut transform_storage)
+                        .with(GlobalTransform::default(), &mut global_transform_storage)
+                        .with(DynamicBody::new_rigidbody_with_velocity(
+                            Velocity::linear(0.0, 1.0, 0.0),
+                            10.0,
+                            Matrix3::one(),
+                            spawner.ball.center_of_mass(),
+                        ), &mut body_storage)
+                        .with(
+                            ColliderBuilder::from(spawner.ball.clone())
+                                .physics_material(PhysicsMaterial::default())
+                                .build()
+                                .unwrap(),
+                            &mut collider_storage
+                        )
+                        .with(TimeToLive(200), &mut ttl_storage)
+                        .build();
+                }
+            }
+        }
+    }
+}
+
 fn main() -> amethyst::Result<()> {
     amethyst::start_logger(Default::default());
 
@@ -252,7 +377,10 @@ fn main() -> amethyst::Result<()> {
                 .with_dep(&["transform_system"])
                 .with_timestep_iter_limit(20),
         )?
-        .with_bundle(RenderBundle::new(pipe, Some(display_config)))?;
+        .with_bundle(RenderBundle::new(pipe, Some(display_config)))?
+        .with(SpawnerSystem, "spawner_system", &[])
+        .with(TimeToLiveSystem, "ttl_system", &[])
+    ;
 
     let application = Application::new("./", GameState::default(), game_data);
 
